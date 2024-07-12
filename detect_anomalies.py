@@ -317,7 +317,7 @@ def build_model(input_shape, head_size, num_heads, ff_dim, num_transformer_block
     inputs = layers.Input(shape=input_shape)
     time_embedding = Time2Vector(SEQ_LENGTH)(inputs)
     x = layers.Concatenate(axis=-1)([inputs, time_embedding])
-    x = layers.Dense(head_size)(x)  # Embedding to the same dimension as head_size
+    x = layers.Dense(head_size, dtype='float32')(x)  # Embedding to the same dimension as head_size
     for _ in range(num_transformer_blocks):
         x = TransformerBlock(head_size, num_heads, ff_dim, dropout)(x, training=True)
 

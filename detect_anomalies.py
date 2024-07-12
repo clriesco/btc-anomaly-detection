@@ -399,7 +399,8 @@ def main():
     test_dataset = create_tf_dataset(test_data_split, SEQ_LENGTH, BATCH_SIZE, 'test')
 
     # Configuration for multiprocessing
-    strategy = tf.distribute.MultiWorkerMirroredStrategy()
+    #strategy = tf.distribute.MultiWorkerMirroredStrategy()
+    strategy = tf.distribute.MirroredStrategy()
 
     with strategy.scope():
         input_shape = (SEQ_LENGTH, n_components)

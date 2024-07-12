@@ -43,8 +43,18 @@ os.makedirs(DATA_DIR, exist_ok=True)
 os.makedirs(MODELS_DIR, exist_ok=True)
 os.makedirs(PROCESSED_DATA_DIR, exist_ok=True)
 
-# Configuration for multiprocessing
-strategy = tf.distribute.MirroredStrategy()
+# Force TensorFlow to use GPU
+gpus = tf.config.experimental.list_physical_devices('GPU')
+if gpus:
+    try:
+        # Currently, memory growth needs to be the same across GPUs
+        for gpu in gpus:
+            tf.config.experimental.set_memory_growth(gpu, True)
+        logical_gpus = tf.config.experimental.list_logical_devices('GPU')
+        logger.info(f"{len(gpus)} Physical GPUs, {len(logical_gpus)} Logical GPUs")
+    except RuntimeError as e:
+        # Memory growth must be set before GPUs have been initialized
+        logger.error(e)
 
 def load_data(file_path):
     """
@@ -157,9 +167,13 @@ def apply_pca(df, n_components, dataset_name):
     """
     logger.info(f"Applying PCA on {dataset_name} dataset")
     pca = PCA(n_components=n_components)
-    transformed_data = pca.fit_transform(df)
-    joblib.dump(pca, os.path.join(MODELS_DIR, f'pca_{dataset_name}.pkl'))
-    logger.info(f"Saved PCA model to {os.path.join(MODELS_DIR, f'pca_{dataset_name}.pkl')}")
+    if dataset_name == 'train':
+        transformed_data = pca.fit_transform(df)
+        joblib.dump(pca, os.path.join(MODELS_DIR, f'pca_{dataset_name}.pkl'))
+        logger.info(f"Saved PCA model to {os.path.join(MODELS_DIR, f'pca_{dataset_name}.pkl')}")
+    else:
+        pca = joblib.load(os.path.join(MODELS_DIR, f'pca_train.pkl'))
+        transformed_data = pca.transform(df)
     return transformed_data
 
 def determine_pca_components(df):
@@ -174,8 +188,6 @@ def determine_pca_components(df):
     """
     pca = PCA().fit(df)
     cumulative_variance = np.cumsum(pca.explained_variance_ratio_)
-    logger.info("Explained Variance Ratio:")
-    logger.info(cumulative_variance)
     n_components = np.argmax(cumulative_variance >= 0.95) + 1
     logger.info(f"Number of PCA components explaining 95% variance: {n_components}")
     return n_components
@@ -217,95 +229,6 @@ def normalize_data(train_data, valid_data, test_data):
     logger.info(f"Saver scaler to {os.path.join(MODELS_DIR, 'scaler.pkl')}")
     return train_data, valid_data, test_data
 
-def serialize_example(X, y):
-    """
-    Serializes a single example to a tf.train.Example.
-    
-    Args:
-        X (np.array): Input data.
-        y (np.array): Target data.
-    
-    Returns:
-        str: Serialized example.
-    """
-    feature = {
-        'X': tf.train.Feature(float_list=tf.train.FloatList(value=X.flatten())),
-        'y': tf.train.Feature(float_list=tf.train.FloatList(value=y.flatten()))
-    }
-    example_proto = tf.train.Example(features=tf.train.Features(feature=feature))
-    return example_proto.SerializeToString()
-
-def save_tf_dataset(dataset, filename):
-    """
-    Saves a TensorFlow dataset to a TFRecord file.
-
-    Args:
-        dataset (tf.data.Dataset): The dataset to save.
-        filename (str): The filename of the TFRecord file.
-    """
-    writer = tf.io.TFRecordWriter(filename)
-    for X, y in dataset:
-        example = serialize_example(X.numpy(), y.numpy())
-        writer.write(example)
-    writer.close()
-
-def parse_function(proto, seq_length, n_features):
-    """
-    Parses a single tf.train.Example into feature tensors.
-    
-    Args:
-        proto (tf.train.Example): Serialized example.
-        seq_length (int): Sequence length for each sample.
-        n_features (int): Number of features in each sample.
-    
-    Returns:
-        tuple: Parsed (X, y) feature tensors.
-    """
-    feature_description = {
-        'X': tf.io.FixedLenFeature([seq_length * n_features], tf.float32),
-        'y': tf.io.FixedLenFeature([n_features], tf.float32)
-    }
-    parsed_features = tf.io.parse_single_example(proto, feature_description)
-    X = tf.reshape(parsed_features['X'], (seq_length, n_features))
-    y = parsed_features['y']
-    return X, y
-
-def load_tf_dataset(filename, seq_length, n_features):
-    """
-    Loads a TensorFlow dataset from a TFRecord file.
-
-    Args:
-        filename (str): The filename of the TFRecord file.
-        seq_length (int): Sequence length for each sample.
-        n_features (int): Number of features in each sample.
-
-    Returns:
-        tf.data.Dataset: The loaded dataset.
-    """
-    raw_dataset = tf.data.TFRecordDataset(filename)
-    parsed_dataset = raw_dataset.map(lambda x: parse_function(x, seq_length, n_features))
-    return parsed_dataset
-
-def create_tfrecord_from_dataset(dataset, filename):
-    """
-    Converts a TensorFlow dataset to TFRecord format and saves it.
-
-    Args:
-        dataset (tf.data.Dataset): The dataset to convert and save.
-        filename (str): The filename of the TFRecord file.
-    """
-    def _serialize_example(X, y):
-        feature = {
-            'X': tf.train.Feature(float_list=tf.train.FloatList(value=X.numpy().flatten())),
-            'y': tf.train.Feature(float_list=tf.train.FloatList(value=y.numpy()))
-        }
-        example_proto = tf.train.Example(features=tf.train.Features(feature=feature))
-        return example_proto.SerializeToString()
-
-    serialized_dataset = dataset.map(lambda X, y: tf.py_function(_serialize_example, [X, y], tf.string))
-    writer = tf.data.experimental.TFRecordWriter(filename)
-    writer.write(serialized_dataset)
-
 def create_tf_dataset(data, seq_length, batch_size, dataset_name):
     """
     Creates a tf.data.Dataset from numpy arrays.
@@ -325,8 +248,9 @@ def create_tf_dataset(data, seq_length, batch_size, dataset_name):
         X.append(data[i:(i + seq_length)])
         y.append(data[i + seq_length])
     X, y = np.array(X), np.array(y)
-    dataset = tf.data.Dataset.from_tensor_slices((X, y))
-    dataset = dataset.cache().shuffle(buffer_size=len(X)).batch(batch_size).prefetch(buffer_size=tf.data.experimental.AUTOTUNE)
+    with tf.device('/cpu:0'):
+        dataset = tf.data.Dataset.from_tensor_slices((X, y))
+        dataset = dataset.cache().shuffle(buffer_size=len(X)).batch(batch_size).prefetch(buffer_size=tf.data.experimental.AUTOTUNE)
     return dataset
 
 class TransformerBlock(layers.Layer):
@@ -341,24 +265,16 @@ class TransformerBlock(layers.Layer):
         )
         self.layernorm1 = layers.LayerNormalization(epsilon=1e-6)
         self.layernorm2 = layers.LayerNormalization(epsilon=1e-6)
-        print(f"Embedding dimension: {embed_dim}, Number of heads: {num_heads}, Feedforward dimension: {ff_dim}")
-        print(f"Dropout rate: {rate}")
-        print(f"Data types: embed_dim: {type(embed_dim)}, num_heads: {type(num_heads)}, ff_dim: {type(ff_dim)}, rate: {type(rate)}")
         self.dropout1 = layers.Dropout(rate)
         self.dropout2 = layers.Dropout(rate)
 
     def call(self, inputs, training=False):
-        print(f"Inputs shape: {inputs.shape}, dtype: {inputs.dtype}")
         attn_output = self.att(inputs, inputs)
-        print(f"Attention output shape: {attn_output.shape}, dtype: {attn_output.dtype}")
         attn_output = self.dropout1(attn_output, training=training)
         out1 = self.layernorm1(inputs + attn_output)
-        print(f"LayerNorm1 output shape: {out1.shape}, dtype: {out1.dtype}")
         ffn_output = self.ffn(out1)
-        print(f"FFN output shape: {ffn_output.shape}, dtype: {ffn_output.dtype}")
         ffn_output = self.dropout2(ffn_output, training=training)
         final_output = self.layernorm2(out1 + ffn_output)
-        print(f"Final output shape: {final_output.shape}, dtype: {final_output.dtype}")
         return final_output
 
 
@@ -413,22 +329,18 @@ def build_model(input_shape, head_size, num_heads, ff_dim, num_transformer_block
     Returns:
         tf.keras.Model: Compiled model.
     """
-    print(f"Building model with input_shape: {input_shape}, head_size: {head_size}, num_heads: {num_heads}, ff_dim: {ff_dim}")
     inputs = layers.Input(shape=input_shape)
     time_embedding = Time2Vector(SEQ_LENGTH)(inputs)
     x = layers.Concatenate(axis=-1)([inputs, time_embedding])
-    print(f"Shape after concatenation: {x.shape}, dtype: {x.dtype}")
     x = layers.Dense(head_size, dtype='float32')(x)  # Embedding to the same dimension as head_size
     for _ in range(num_transformer_blocks):
         x = TransformerBlock(head_size, num_heads, ff_dim, dropout)(x, training=True)
-        print(f"Shape after TransformerBlock: {x.shape}, dtype: {x.dtype}")
 
     x = layers.GlobalAveragePooling1D()(x)
     for dim in mlp_units:
         x = layers.Dense(dim, activation="relu")(x)
         x = layers.Dropout(mlp_dropout)(x)
     outputs = layers.Dense(input_shape[-1])(x)
-    print(f"Output shape: {outputs.shape}, dtype: {outputs.dtype}")
     return Model(inputs, outputs)
 
 def plot_loss(history):
@@ -455,18 +367,12 @@ def main():
     logger.info("Starting main function")
     
     # Check if processed datasets exist
-    train_dataset_path = os.path.join(PROCESSED_DATA_DIR, 'train_dataset.tfrecord')
-    valid_dataset_path = os.path.join(PROCESSED_DATA_DIR, 'valid_dataset.tfrecord')
-    test_dataset_path = os.path.join(PROCESSED_DATA_DIR, 'test_dataset.tfrecord')
+    train_data_path = os.path.join(PROCESSED_DATA_DIR, 'train_data.csv')
+    valid_data_path = os.path.join(PROCESSED_DATA_DIR, 'valid_data.csv')
+    test_data_path = os.path.join(PROCESSED_DATA_DIR, 'test_data.csv')
 
-    if os.path.exists(train_dataset_path) and os.path.exists(valid_dataset_path) and os.path.exists(test_dataset_path):
-        #Get the number of features from csv file
-        df = load_data(os.path.join(PROCESSED_DATA_DIR, 'test_data.csv'))
-        features = df.columns
-
-        train_dataset = load_tf_dataset(train_dataset_path, SEQ_LENGTH, len(features))
-        valid_dataset = load_tf_dataset(valid_dataset_path, SEQ_LENGTH, len(features))
-        test_dataset = load_tf_dataset(test_dataset_path, SEQ_LENGTH, len(features))
+    if os.path.exists(train_data_path) and os.path.exists(valid_data_path) and os.path.exists(test_data_path):
+        train_data_split, valid_data_split, test_data_split = load_datasets()
     else:
         # Load and preprocess data
         df = load_data(os.path.join(DATA_DIR, 'bitcoin_1min_data.csv'))
@@ -510,31 +416,26 @@ def main():
     valid_dataset = create_tf_dataset(valid_data_split, SEQ_LENGTH, BATCH_SIZE, 'validation')
     test_dataset = create_tf_dataset(test_data_split, SEQ_LENGTH, BATCH_SIZE, 'test')
 
-    # Save TFRecord datasets
-    create_tfrecord_from_dataset(train_dataset, train_dataset_path)
-    create_tfrecord_from_dataset(valid_dataset, valid_dataset_path)
-    create_tfrecord_from_dataset(test_dataset, test_dataset_path)
+    input_shape = (SEQ_LENGTH, n_components)
+    model = build_model(input_shape, HEAD_SIZE, NUM_HEADS, FF_DIM, NUM_TRANSFORMER_BLOCKS, MLP_UNITS, DROPOUT, MLP_DROPOUT)
+    model.compile(optimizer=tf.keras.optimizers.Adam(learning_rate=LEARNING_RATE), loss="mse")
 
-    with strategy.scope():
-        input_shape = (SEQ_LENGTH, n_components)
-        model = build_model(input_shape, HEAD_SIZE, NUM_HEADS, FF_DIM, NUM_TRANSFORMER_BLOCKS, MLP_UNITS, DROPOUT, MLP_DROPOUT)
-        model.compile(optimizer=tf.keras.optimizers.Adam(learning_rate=LEARNING_RATE), loss="mse")
+    # Print model summary
+    model.summary()
 
-        # Print model summary
-        model.summary()
+    # Define Early Stopping callback
+    early_stopping = tf.keras.callbacks.EarlyStopping(
+        monitor='val_loss',
+        patience=EARLY_STOPPING_PATIENCE,
+        restore_best_weights=True
+    )
 
-        # Define Early Stopping callback
-        early_stopping = tf.keras.callbacks.EarlyStopping(
-            monitor='val_loss',
-            patience=EARLY_STOPPING_PATIENCE,
-            restore_best_weights=True
-        )
+    # Measure training time
+    start_time = time.time()
 
-        # Measure training time
-        start_time = time.time()
-
-        logger.info("Training model")
-        # Train the model with Early Stopping and multiple workers
+    # Train the model with Early Stopping and multiple workers
+    logger.info("Training model")
+    with tf.device('/gpu:0'):
         history = model.fit(
             train_dataset,
             validation_data=valid_dataset,
@@ -543,13 +444,13 @@ def main():
             verbose=1
         )
 
-        end_time = time.time()
-        training_time = end_time - start_time
-        logger.info(f"Training Time: {training_time:.2f} seconds")
+    end_time = time.time()
+    training_time = end_time - start_time
+    logger.info(f"Training Time: {training_time:.2f} seconds")
 
-        # Save the model
-        model.save(os.path.join(MODELS_DIR, 'transformer_model'))
-        logger.info(f"Saved model to {os.path.join(MODELS_DIR, 'transformer_model')}")
+    # Save the model
+    model.save(os.path.join(MODELS_DIR, 'transformer_model'))
+    logger.info(f"Saved model to {os.path.join(MODELS_DIR, 'transformer_model')}")
 
     # Evaluate the model on the test set
     logger.info("Evaluating the model on the test set")

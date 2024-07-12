@@ -399,8 +399,7 @@ def main():
     test_dataset = create_tf_dataset(test_data_split, SEQ_LENGTH, BATCH_SIZE, 'test')
 
     # Configuration for multiprocessing
-    #strategy = tf.distribute.MultiWorkerMirroredStrategy()
-    strategy = tf.distribute.MirroredStrategy()
+    strategy = tf.distribute.MultiWorkerMirroredStrategy()
 
     with strategy.scope():
         input_shape = (SEQ_LENGTH, n_components)
@@ -448,5 +447,7 @@ def main():
 
 if __name__ == "__main__":
     # Ensure TensorFlow collective ops are configured before anything else
-    #tf.config.set_soft_device_placement(True)
+    strategy = tf.distribute.MultiWorkerMirroredStrategy()
+    tf.config.set_soft_device_placement(True)
+
     main()

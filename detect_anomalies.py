@@ -44,7 +44,7 @@ os.makedirs(MODELS_DIR, exist_ok=True)
 os.makedirs(PROCESSED_DATA_DIR, exist_ok=True)
 
 # Configuration for multiprocessing
-strategy = tf.distribute.MultiWorkerMirroredStrategy()
+strategy = tf.distribute.MirroredStrategy()
 
 def load_data(file_path):
     """
@@ -217,6 +217,95 @@ def normalize_data(train_data, valid_data, test_data):
     logger.info(f"Saver scaler to {os.path.join(MODELS_DIR, 'scaler.pkl')}")
     return train_data, valid_data, test_data
 
+def serialize_example(X, y):
+    """
+    Serializes a single example to a tf.train.Example.
+    
+    Args:
+        X (np.array): Input data.
+        y (np.array): Target data.
+    
+    Returns:
+        str: Serialized example.
+    """
+    feature = {
+        'X': tf.train.Feature(float_list=tf.train.FloatList(value=X.flatten())),
+        'y': tf.train.Feature(float_list=tf.train.FloatList(value=y.flatten()))
+    }
+    example_proto = tf.train.Example(features=tf.train.Features(feature=feature))
+    return example_proto.SerializeToString()
+
+def save_tf_dataset(dataset, filename):
+    """
+    Saves a TensorFlow dataset to a TFRecord file.
+
+    Args:
+        dataset (tf.data.Dataset): The dataset to save.
+        filename (str): The filename of the TFRecord file.
+    """
+    writer = tf.io.TFRecordWriter(filename)
+    for X, y in dataset:
+        example = serialize_example(X.numpy(), y.numpy())
+        writer.write(example)
+    writer.close()
+
+def parse_function(proto, seq_length, n_features):
+    """
+    Parses a single tf.train.Example into feature tensors.
+    
+    Args:
+        proto (tf.train.Example): Serialized example.
+        seq_length (int): Sequence length for each sample.
+        n_features (int): Number of features in each sample.
+    
+    Returns:
+        tuple: Parsed (X, y) feature tensors.
+    """
+    feature_description = {
+        'X': tf.io.FixedLenFeature([seq_length * n_features], tf.float32),
+        'y': tf.io.FixedLenFeature([n_features], tf.float32)
+    }
+    parsed_features = tf.io.parse_single_example(proto, feature_description)
+    X = tf.reshape(parsed_features['X'], (seq_length, n_features))
+    y = parsed_features['y']
+    return X, y
+
+def load_tf_dataset(filename, seq_length, n_features):
+    """
+    Loads a TensorFlow dataset from a TFRecord file.
+
+    Args:
+        filename (str): The filename of the TFRecord file.
+        seq_length (int): Sequence length for each sample.
+        n_features (int): Number of features in each sample.
+
+    Returns:
+        tf.data.Dataset: The loaded dataset.
+    """
+    raw_dataset = tf.data.TFRecordDataset(filename)
+    parsed_dataset = raw_dataset.map(lambda x: parse_function(x, seq_length, n_features))
+    return parsed_dataset
+
+def create_tfrecord_from_dataset(dataset, filename):
+    """
+    Converts a TensorFlow dataset to TFRecord format and saves it.
+
+    Args:
+        dataset (tf.data.Dataset): The dataset to convert and save.
+        filename (str): The filename of the TFRecord file.
+    """
+    def _serialize_example(X, y):
+        feature = {
+            'X': tf.train.Feature(float_list=tf.train.FloatList(value=X.numpy().flatten())),
+            'y': tf.train.Feature(float_list=tf.train.FloatList(value=y.numpy()))
+        }
+        example_proto = tf.train.Example(features=tf.train.Features(feature=feature))
+        return example_proto.SerializeToString()
+
+    serialized_dataset = dataset.map(lambda X, y: tf.py_function(_serialize_example, [X, y], tf.string))
+    writer = tf.data.experimental.TFRecordWriter(filename)
+    writer.write(serialized_dataset)
+
 def create_tf_dataset(data, seq_length, batch_size, dataset_name):
     """
     Creates a tf.data.Dataset from numpy arrays.
@@ -252,16 +341,26 @@ class TransformerBlock(layers.Layer):
         )
         self.layernorm1 = layers.LayerNormalization(epsilon=1e-6)
         self.layernorm2 = layers.LayerNormalization(epsilon=1e-6)
+        print(f"Embedding dimension: {embed_dim}, Number of heads: {num_heads}, Feedforward dimension: {ff_dim}")
+        print(f"Dropout rate: {rate}")
+        print(f"Data types: embed_dim: {type(embed_dim)}, num_heads: {type(num_heads)}, ff_dim: {type(ff_dim)}, rate: {type(rate)}")
         self.dropout1 = layers.Dropout(rate)
         self.dropout2 = layers.Dropout(rate)
 
     def call(self, inputs, training=False):
+        print(f"Inputs shape: {inputs.shape}, dtype: {inputs.dtype}")
         attn_output = self.att(inputs, inputs)
+        print(f"Attention output shape: {attn_output.shape}, dtype: {attn_output.dtype}")
         attn_output = self.dropout1(attn_output, training=training)
         out1 = self.layernorm1(inputs + attn_output)
+        print(f"LayerNorm1 output shape: {out1.shape}, dtype: {out1.dtype}")
         ffn_output = self.ffn(out1)
+        print(f"FFN output shape: {ffn_output.shape}, dtype: {ffn_output.dtype}")
         ffn_output = self.dropout2(ffn_output, training=training)
-        return self.layernorm2(out1 + ffn_output)
+        final_output = self.layernorm2(out1 + ffn_output)
+        print(f"Final output shape: {final_output.shape}, dtype: {final_output.dtype}")
+        return final_output
+
 
 class Time2Vector(layers.Layer):
     """
@@ -356,12 +455,18 @@ def main():
     logger.info("Starting main function")
     
     # Check if processed datasets exist
-    train_data_path = os.path.join(PROCESSED_DATA_DIR, 'train_data.csv')
-    valid_data_path = os.path.join(PROCESSED_DATA_DIR, 'valid_data.csv')
-    test_data_path = os.path.join(PROCESSED_DATA_DIR, 'test_data.csv')
+    train_dataset_path = os.path.join(PROCESSED_DATA_DIR, 'train_dataset.tfrecord')
+    valid_dataset_path = os.path.join(PROCESSED_DATA_DIR, 'valid_dataset.tfrecord')
+    test_dataset_path = os.path.join(PROCESSED_DATA_DIR, 'test_dataset.tfrecord')
 
-    if os.path.exists(train_data_path) and os.path.exists(valid_data_path) and os.path.exists(test_data_path):
-        train_data_split, valid_data_split, test_data_split = load_datasets()
+    if os.path.exists(train_dataset_path) and os.path.exists(valid_dataset_path) and os.path.exists(test_dataset_path):
+        #Get the number of features from csv file
+        df = load_data(os.path.join(PROCESSED_DATA_DIR, 'test_data.csv'))
+        features = df.columns
+
+        train_dataset = load_tf_dataset(train_dataset_path, SEQ_LENGTH, len(features))
+        valid_dataset = load_tf_dataset(valid_dataset_path, SEQ_LENGTH, len(features))
+        test_dataset = load_tf_dataset(test_dataset_path, SEQ_LENGTH, len(features))
     else:
         # Load and preprocess data
         df = load_data(os.path.join(DATA_DIR, 'bitcoin_1min_data.csv'))
@@ -404,6 +509,11 @@ def main():
     train_dataset = create_tf_dataset(train_data_split, SEQ_LENGTH, BATCH_SIZE, 'train')
     valid_dataset = create_tf_dataset(valid_data_split, SEQ_LENGTH, BATCH_SIZE, 'validation')
     test_dataset = create_tf_dataset(test_data_split, SEQ_LENGTH, BATCH_SIZE, 'test')
+
+    # Save TFRecord datasets
+    create_tfrecord_from_dataset(train_dataset, train_dataset_path)
+    create_tfrecord_from_dataset(valid_dataset, valid_dataset_path)
+    create_tfrecord_from_dataset(test_dataset, test_dataset_path)
 
     with strategy.scope():
         input_shape = (SEQ_LENGTH, n_components)

@@ -10,7 +10,6 @@ import joblib
 import matplotlib.pyplot as plt
 import logging
 import coloredlogs
-import json
 
 # Configuring logging
 logger = logging.getLogger(__name__)
@@ -447,10 +446,6 @@ def main():
     plot_loss(history)
 
 if __name__ == "__main__":
-    tf_config = json.loads(os.environ['TF_CONFIG'])
-    num_workers = len(tf_config['cluster']['worker'])
-    logger.info(f"Number of workers: {num_workers}")
-    logger.info(f"TF_CONFIG: {tf_config}")
     # Ensure TensorFlow collective ops are configured before anything else
-    tf.config.set_soft_device_placement(True)
+    #tf.config.set_soft_device_placement(True)
     main()

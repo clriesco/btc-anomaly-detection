@@ -43,6 +43,9 @@ os.makedirs(DATA_DIR, exist_ok=True)
 os.makedirs(MODELS_DIR, exist_ok=True)
 os.makedirs(PROCESSED_DATA_DIR, exist_ok=True)
 
+# Configuration for multiprocessing
+strategy = tf.distribute.MultiWorkerMirroredStrategy()
+
 def load_data(file_path):
     """
     Loads data from a CSV file.
@@ -398,9 +401,6 @@ def main():
     valid_dataset = create_tf_dataset(valid_data_split, SEQ_LENGTH, BATCH_SIZE, 'validation')
     test_dataset = create_tf_dataset(test_data_split, SEQ_LENGTH, BATCH_SIZE, 'test')
 
-    # Configuration for multiprocessing
-    strategy = tf.distribute.MultiWorkerMirroredStrategy()
-
     with strategy.scope():
         input_shape = (SEQ_LENGTH, n_components)
         model = build_model(input_shape, HEAD_SIZE, NUM_HEADS, FF_DIM, NUM_TRANSFORMER_BLOCKS, MLP_UNITS, DROPOUT, MLP_DROPOUT)
@@ -446,8 +446,4 @@ def main():
     plot_loss(history)
 
 if __name__ == "__main__":
-    # Ensure TensorFlow collective ops are configured before anything else
-    strategy = tf.distribute.MultiWorkerMirroredStrategy()
-    tf.config.set_soft_device_placement(True)
-
     main()

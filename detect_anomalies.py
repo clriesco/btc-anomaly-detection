@@ -446,4 +446,6 @@ def main():
     plot_loss(history)
 
 if __name__ == "__main__":
+    # Ensure TensorFlow collective ops are configured before anything else
+    tf.config.set_soft_device_placement(True)
     main()

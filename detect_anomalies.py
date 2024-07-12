@@ -314,18 +314,22 @@ def build_model(input_shape, head_size, num_heads, ff_dim, num_transformer_block
     Returns:
         tf.keras.Model: Compiled model.
     """
+    print(f"Building model with input_shape: {input_shape}, head_size: {head_size}, num_heads: {num_heads}, ff_dim: {ff_dim}")
     inputs = layers.Input(shape=input_shape)
     time_embedding = Time2Vector(SEQ_LENGTH)(inputs)
     x = layers.Concatenate(axis=-1)([inputs, time_embedding])
+    print(f"Shape after concatenation: {x.shape}, dtype: {x.dtype}")
     x = layers.Dense(head_size, dtype='float32')(x)  # Embedding to the same dimension as head_size
     for _ in range(num_transformer_blocks):
         x = TransformerBlock(head_size, num_heads, ff_dim, dropout)(x, training=True)
+        print(f"Shape after TransformerBlock: {x.shape}, dtype: {x.dtype}")
 
     x = layers.GlobalAveragePooling1D()(x)
     for dim in mlp_units:
         x = layers.Dense(dim, activation="relu")(x)
         x = layers.Dropout(mlp_dropout)(x)
     outputs = layers.Dense(input_shape[-1])(x)
+    print(f"Output shape: {outputs.shape}, dtype: {outputs.dtype}")
     return Model(inputs, outputs)
 
 def plot_loss(history):
